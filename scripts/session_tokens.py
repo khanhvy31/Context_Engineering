@@ -78,7 +78,7 @@ def parse_jsonl(path, stats):
 
         if entry.get("type") == "user" and stats["prompt"] is None:
             text = first_text(message.get("content"))
-            if text and not text.startswith("<"):
+            if text and not text.startswith(("<", "## Context Usage")):
                 stats["prompt"] = text
 
         if entry.get("type") != "assistant":
@@ -87,6 +87,8 @@ def parse_jsonl(path, stats):
         content = message.get("content")
         if isinstance(content, list):
             for block in content:
+                if isinstance(block, dict) and block.get("type") == "text" and block.get("text"):
+                    stats["final_text"] = block["text"]
                 if isinstance(block, dict) and block.get("type") == "tool_use":
                     stats["tool_ids"].add(block.get("id") or id(block))
 
@@ -113,8 +115,23 @@ def first_text(content):
     return None
 
 
+def extract_answer(text):
+    """Pull the headline rate and hit/missed verdict out of Claude's final reply."""
+    if not text:
+        return "?"
+    rate = re.search(r"(\d+(?:\.\d+)?)\s*%", text)
+    verdict = re.search(r"\b(didn't hit|did not hit|not hit|missed|misses|miss|hit)\b",
+                        text, re.IGNORECASE)
+    parts = []
+    if rate:
+        parts.append(rate.group(1) + "%")
+    if verdict:
+        parts.append("HIT" if verdict.group(1).lower() == "hit" else "MISSED")
+    return " ".join(parts) or "?"
+
+
 def new_stats():
-    return {"messages": {}, "order": [], "tool_ids": set(), "branch": None,
+    return {"messages": {}, "order": [], "tool_ids": set(), "branch": None, "final_text": None,
             "model": None, "prompt": None, "first_ts": None, "last_ts": None}
 
 
@@ -150,6 +167,7 @@ def summarize(session_file):
         "branch": main["branch"] or "?",
         "model": main["model"] or "?",
         "prompt": main["prompt"] or "",
+        "answer": extract_answer(main["final_text"]),
         "started": main["first_ts"],
         "main": main_t,
         "sub": sub_t,
@@ -178,6 +196,7 @@ def print_single(s):
     print(f"Started:  {fmt_time(s['started'])}   Branch: {s['branch']}   Model: {s['model']}")
     if s["prompt"]:
         print(f"Prompt:   {shorten(s['prompt'], 70)}")
+    print(f"Answer:   {s['answer']}")
     print()
     rows = [
         ("Input tokens", "input_tokens"),
@@ -217,12 +236,13 @@ def print_table(summaries):
         ("Turns", lambda s: fmt_num(s["main"]["turns"] + s["sub"]["turns"])),
         ("Tools", lambda s: fmt_num(s["main"]["tool_calls"] + s["sub"]["tool_calls"])),
         ("Last ctx", lambda s: fmt_num(s["last_context"])),
+        ("Answer", lambda s: s["answer"]),
         ("Session", lambda s: s["session"][:8]),
     ]
     table = [[name for name, _ in cols]] + [[fn(s) for _, fn in cols] for s in summaries]
     widths = [max(len(row[i]) for row in table) for i in range(len(cols))]
     for i, row in enumerate(table):
-        print("  ".join(cell.rjust(widths[j]) if j >= 2 and j < len(cols) - 1 else cell.ljust(widths[j])
+        print("  ".join(cell.rjust(widths[j]) if 2 <= j < len(cols) - 2 else cell.ljust(widths[j])
                         for j, cell in enumerate(row)))
         if i == 0:
             print("  ".join("-" * w for w in widths))
